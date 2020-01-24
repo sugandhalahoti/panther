@@ -1,0 +1,411 @@
+# Panther is a scalable, powerful, cloud-native SIEM written in Golang/React.
+# Copyright (C) 2020 Panther Labs Inc
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Prerequisite resources which don't change often and don't require assets in S3
+
+Parameters:
+  AccessLogsBucketName:
+    Type: String
+    Description: Optional bucket for storing S3 access logs. If not specified, one is created for you
+    Default: ''
+  CertificateArn:
+    Type: String
+    Description: The ARN of the TLS certificate that is going to be used by the ALB listener
+
+Mappings:
+  SubnetConfig:
+    VPC:
+      CIDR: 10.0.0.0/24
+    PublicOne:
+      CIDR: 10.0.0.0/26
+    PublicTwo:
+      CIDR: 10.0.0.64/26
+
+Conditions:
+  CreateLogBucket: !Equals [!Ref AccessLogsBucketName, '']
+
+Resources:
+  ########## S3 ##########
+  # S3 bucket for Panther S3 access logs
+  AccessLogsBucket:
+    Condition: CreateLogBucket
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Sub panther-s3-logs-${AWS::AccountId}-${AWS::Region}
+      LifecycleConfiguration:
+        Rules:
+          # Keep access logs for 1 year, permanently delete 30 days after they expire
+          - ExpirationInDays: 365
+            NoncurrentVersionExpirationInDays: 30
+            Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Sub panther-s3-logs-${AWS::AccountId}-${AWS::Region}
+        LogFilePrefix: !Sub panther-s3-logs-${AWS::AccountId}-${AWS::Region}/
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  # S3 bucket for CloudFormation to upload templates, Lambda source, etc
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Sub panther-source-${AWS::AccountId}-${AWS::Region}
+      LifecycleConfiguration:
+        Rules:
+          # Once a stack is deployed, its resources in S3 can be safely removed.
+          - ExpirationInDays: 90
+            Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !If [CreateLogBucket, !Ref AccessLogsBucket, !Ref AccessLogsBucketName]
+        LogFilePrefix: !Sub panther-source-${AWS::AccountId}-${AWS::Region}/
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  ########## IAM ##########
+  GatewayLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: API Gateway uses this role to publish logs to CloudWatch
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  GatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt GatewayLoggingRole.Arn
+
+  CognitoSNSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cognito-idp.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CognitoSNSPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: sns:publish
+                Resource: '*'
+
+  WebApplicationServerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows containers in the task to pull images and publish logs to CloudWatch
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+        - PolicyName: PullECRImages
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:ListImages
+                  - ecr:ListTagsForResource
+                Resource: '*'
+
+  ########## KMS ##########
+  QueueEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encryption key for all panther SQS queues
+      EnableKeyRotation: true
+      KeyPolicy:
+        # Allow account root user to administer key (required)
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource: '*'
+
+  QueueEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/panther-sqs
+      TargetKeyId: !Ref QueueEncryptionKey
+
+  ########## ECS + ECR ##########
+  WebApplicationCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: panther-web-cluster
+
+  PantherWebImageRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: panther-web
+      LifecyclePolicy:
+        RegistryId: !Ref AWS::AccountId
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Makes sure to keep only the last 10 images that have been uploaded",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  ########## EC2 ##########
+  # A VPC that will be used by our stack's security group, added to our web-service
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !FindInMap [SubnetConfig, VPC, CIDR]
+
+  # We define a public subnet so that we can access our web server from a public IP. The empty
+  # string in !GetAZs is equivalent to AWS::Region
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [SubnetConfig, PublicOne, CIDR]
+      MapPublicIpOnLaunch: true
+
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [SubnetConfig, PublicTwo, CIDR]
+      MapPublicIpOnLaunch: true
+
+  # The lines below setup networking resources for the public subnets. Containers in the public
+  # subnets have public IP addresses and the routing table sends network traffic via the IG.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  # Attach the public Internet Gateway to our VPC
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Define a route table in order to map & route IP addresses
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  # Because we have a public VPC, we need to map 0.0.0.0/0 through an Internet Gateway in order
+  # to be out there in the network
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Associate the route table that we have created (with the mapping right above) to our public
+  # subnets in order to be used by it
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetTwo
+      RouteTableId: !Ref PublicRouteTable
+
+  # Public load balancer, hosted in public subnets that is accessible
+  # to the public, and is intended to route traffic to one or more public
+  # facing services. This is used for accepting traffic from the public
+  # internet and directing it to public facing microservices
+  PublicLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: web-lb
+      GroupDescription: Access to the public facing load balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # Allow access to ALB from anywhere on the internet. If you want to restrict access to the
+        # load balancer from specific IPs, add your own network CIDRs.
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          ToPort: 80
+          IpProtocol: tcp
+        - CidrIp: 0.0.0.0/0
+          FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+
+  # Adds the networking stack to a security group and exposes the necessary TCP ports that allow
+  # our server to communicate with the outside world.
+  WebApplicationServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: panther-web-container
+      GroupDescription: Access to the Fargate containers
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+      VpcId: !Ref VPC
+
+  EcsSecurityGroupIngressFromPublicALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from the public ALB
+      GroupId: !Ref WebApplicationServerSecurityGroup
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+
+  ########## ELB ##########
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: web
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "30"
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+      SecurityGroups:
+        - !Ref PublicLoadBalancerSecurityGroup
+
+  PublicLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+
+  # A target group is connected to a network or application load balancer, so it can automatically
+  # distribute traffic across all the targets.
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: panther-web
+      HealthCheckProtocol: HTTP
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 60
+      HealthCheckPath: /healthcheck
+      HealthCheckTimeoutSeconds: 6
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds # Instantly deregister draining targets since we have 200% max capacity
+          Value: '0'
+      TargetType: ip
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+
+  # Create a rule on the load balancer for routing traffic to the target group
+  LoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '*'
+      ListenerArn: !Ref PublicLoadBalancerListener
+      Priority: 1
+
+Outputs:
+  LogBucketName:
+    Description: S3 bucket name for Panther S3 access logs
+    Value: !If [CreateLogBucket, !Ref AccessLogsBucket, !Ref AccessLogsBucketName]
+  SourceBucketName:
+    Description: S3 bucket name for Panther CloudFormation packaging
+    Value: !Ref SourceBucket
+  ImageRepo:
+    Description: The name of the registry hosting the panther web image
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/panther-web
+  LoadBalancerUrl:
+    Description: The URL of the ALB
+    Value: !GetAtt PublicLoadBalancer.DNSName
