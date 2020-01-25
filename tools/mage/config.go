@@ -20,23 +20,18 @@ package mage
 
 const configFile = "deployments/panther_config.yml"
 
-type bucketsParameters struct {
-	AccessLogsBucketName string `yaml:"AccessLogsBucketName"`
-}
-
-type backendParameters struct {
-	CloudWatchLogRetentionDays   int    `yaml:"CloudWatchLogRetentionDays"`
-	Debug                        bool   `yaml:"Debug"`
-	LayerVersionArns             string `yaml:"LayerVersionArns"`
-	PythonLayerVersionArn        string `yaml:"PythonLayerVersionArn"`
-	WebApplicationCertificateArn string `yaml:"WebApplicationCertificateArn"`
-	TracingMode                  string `yaml:"TracingMode"`
-}
-
 // PantherConfig describes the panther_config.yml file.
 type PantherConfig struct {
-	BucketsParameterValues bucketsParameters `yaml:"BucketsParameterValues"`
-	BackendParameterValues backendParameters `yaml:"BackendParameterValues"`
-	PipLayer               []string          `yaml:"PipLayer"`
-	InitialAnalysisSets    []string          `yaml:"InitialAnalysisSets"`
+	CloudFormationParameters cfnParameters `yaml:"CloudFormationParameters"`
+	PipLayer                 []string      `yaml:"PipLayer"`
+	InitialAnalysisSets      []string      `yaml:"InitialAnalysisSets"`
+}
+
+type cfnParameters struct {
+	PrereqStack prereqParameters `yaml:"PrereqStack"`
+}
+
+type prereqParameters struct {
+	AccessLogsBucketName string `yaml:"AccessLogsBucketName"`
+	CertificateArn       string `yaml:"CertificateArn"`
 }

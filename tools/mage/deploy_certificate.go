@@ -44,7 +44,7 @@ const (
 	privateKeyFile       = keysDirectory + "/panther-tls-private.key"
 	keyLength            = 2048
 	certFilePermissions  = 0700
-	certificateOutputKey = "WebApplicationCertificateArn"
+	certificateOutputKey = "CertificateArn"
 )
 
 // Upload a local self-signed TLS certificate to ACM. Only needs to happen once per installation
@@ -110,7 +110,7 @@ func uploadLocalCertificate(awsSession *session.Session) (string, error) {
 }
 
 func getExistingCertificate(awsSession *session.Session) (string, error) {
-	outputs, err := getStackOutputs(awsSession, backendStack)
+	outputs, err := getStackOutputs(awsSession, prereqStack)
 	if err != nil {
 		if awsErr, ok := err.(awserr.Error); ok {
 			if awsErr.Code() != "ValidationError" || !strings.HasSuffix(awsErr.Code(), "does not exist") {

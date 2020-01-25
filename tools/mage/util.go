@@ -54,20 +54,24 @@ func loadYamlFile(path string, out interface{}) error {
 }
 
 // Get CloudFormation stack outputs as a map.
-func getStackOutputs(awsSession *session.Session, name string) (map[string]string, error) {
+func getStackOutputs(awsSession *session.Session, stack string) (map[string]string, error) {
 	cfnClient := cloudformation.New(awsSession)
-	input := &cloudformation.DescribeStacksInput{StackName: &name}
+	input := &cloudformation.DescribeStacksInput{StackName: &stack}
 	response, err := cfnClient.DescribeStacks(input)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make(map[string]string, len(response.Stacks[0].Outputs))
-	for _, output := range response.Stacks[0].Outputs {
+	return mapStackOutputs(response.Stacks[0].Outputs), nil
+}
+
+// Convert CloudFormation outputs from a slice to a map.
+func mapStackOutputs(outputs []*cloudformation.Output) map[string]string {
+	result := make(map[string]string, len(outputs))
+	for _, output := range outputs {
 		result[aws.StringValue(output.OutputKey)] = aws.StringValue(output.OutputValue)
 	}
-
-	return result, nil
+	return result
 }
 
 // Upload a local file to S3.

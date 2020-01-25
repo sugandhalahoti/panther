@@ -23,15 +23,14 @@ import (
 	"os"
 	"path"
 	"sort"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go/service/lambda"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/fatih/color"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/magefile/mage/mg"
 	"github.com/magefile/mage/sh"
@@ -43,12 +42,8 @@ import (
 
 const (
 	// CloudFormation templates + stacks
-	backendStack     = "panther-app"
-	backendTemplate  = "deployments/backend.yml"
-	frontendStack    = "panther-app-frontend"
-	frontendTemplate = "deployments/frontend.yml"
-	bucketStack      = "panther-buckets" // prereq stack with Panther S3 buckets
-	bucketTemplate   = "deployments/core/buckets.yml"
+	prereqTemplate = "deployments/prereq.yml"
+	prereqStack    = "panther-prereq"
 
 	// Python layer
 	layerSourceDir   = "out/pip/analysis/python"
@@ -61,6 +56,8 @@ const (
 
 // Deploy Deploy application infrastructure
 func Deploy() error {
+	start := time.Now()
+
 	var config PantherConfig
 	if err := loadYamlFile(configFile, &config); err != nil {
 		return err
@@ -71,120 +68,177 @@ func Deploy() error {
 		return err
 	}
 
-	bucketParams := map[string]string{
-		"AccessLogsBucketName": config.BucketsParameterValues.AccessLogsBucketName,
-	}
-	if err = deployTemplate(awsSession, bucketTemplate, bucketStack, bucketParams); err != nil {
-		return err
-	}
-
-	if err = Build.Lambda(Build{}); err != nil {
-		return err
-	}
-
-	if err = generateGlueTables(); err != nil {
-		return err
-	}
-
-	if err = embedAPISpecs(); err != nil {
-		return err
-	}
-
-	bucketOutputs, err := getStackOutputs(awsSession, bucketStack)
-	if err != nil {
-		return err
-	}
-	bucket := bucketOutputs["SourceBucketName"]
-
-	backendTemplate, err := cfnPackage(backendTemplate, bucket, backendStack)
+	// Deploy initial prerequisite stack - no S3 assets are required here
+	preOutputs, err := deployPrereq(awsSession, config.CloudFormationParameters.PrereqStack)
 	if err != nil {
 		return err
 	}
 
-	backendDeployParams, err := getBackendDeployParams(awsSession, &config, bucket)
-	if err != nil {
-		return err
-	}
+	fmt.Println("stack outputs", preOutputs)
 
-	if err = deployTemplate(awsSession, backendTemplate, backendStack, backendDeployParams); err != nil {
-		return err
-	}
+	// TODO - now we can build the docker image in parallel with the deployment of the main stacks
 
-	backendOutputs, err := getStackOutputs(awsSession, backendStack)
-	if err != nil {
-		return err
-	}
-
-	if err := generateDotEnvFromCfnOutputs(awsSession, backendOutputs, "out/.env"); err != nil {
-		return err
-	}
-
-	dockerImage, err := buildAndPushImageFromSource(awsSession, backendOutputs["WebApplicationImageRegistry"])
-	if err != nil {
-		return err
-	}
-
-	frontendTemplate, err := cfnPackage(frontendTemplate, bucket, frontendStack)
-	if err != nil {
-		return err
-	}
-
-	frontendDeployParams := getFrontendDeployParams(dockerImage, backendOutputs)
-
-	if err = deployTemplate(awsSession, frontendTemplate, frontendStack, frontendDeployParams); err != nil {
-		return err
-	}
-
-	if err := enableTOTP(awsSession, backendOutputs["WebApplicationUserPoolId"]); err != nil {
-		return err
-	}
-
-	if err := setupOrganization(awsSession, backendOutputs["WebApplicationUserPoolId"], backendOutputs["RemediationLambdaArn"]); err != nil {
-		return err
-	}
-
-	if err := initializeAnalysisSets(awsSession, backendOutputs["AnalysisApiEndpoint"], &config); err != nil {
-		return err
-	}
-
-	color.Yellow("\nPanther URL = https://%s\n", backendOutputs["LoadBalancerUrl"])
+	//bucketParams := map[string]string{
+	//	"AccessLogsBucketName": config.BucketsParameterValues.AccessLogsBucketName,
+	//}
+	//if err = deployTemplate(awsSession, bucketTemplate, bucketStack, bucketParams); err != nil {
+	//	return err
+	//}
+	//
+	//if err = Build.Lambda(Build{}); err != nil {
+	//	return err
+	//}
+	//
+	//if err = generateGlueTables(); err != nil {
+	//	return err
+	//}
+	//
+	//if err = embedAPISpecs(); err != nil {
+	//	return err
+	//}
+	//
+	//bucketOutputs, err := getStackOutputs(awsSession, bucketStack)
+	//if err != nil {
+	//	return err
+	//}
+	//bucket := bucketOutputs["SourceBucketName"]
+	//
+	//backendTemplate, err := cfnPackage(backendTemplate, bucket, backendStack)
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//backendDeployParams, err := getBackendDeployParams(awsSession, &config, bucket)
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//if err = deployTemplate(awsSession, backendTemplate, backendStack, backendDeployParams); err != nil {
+	//	return err
+	//}
+	//
+	//backendOutputs, err := getStackOutputs(awsSession, backendStack)
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//if err := generateDotEnvFromCfnOutputs(awsSession, backendOutputs, "out/.env"); err != nil {
+	//	return err
+	//}
+	//
+	//dockerImage, err := buildAndPushImageFromSource(awsSession, backendOutputs["WebApplicationImageRegistry"])
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//frontendTemplate, err := cfnPackage(frontendTemplate, bucket, frontendStack)
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//frontendDeployParams := getFrontendDeployParams(dockerImage, backendOutputs)
+	//
+	//if err = deployTemplate(awsSession, frontendTemplate, frontendStack, frontendDeployParams); err != nil {
+	//	return err
+	//}
+	//
+	//if err := enableTOTP(awsSession, backendOutputs["WebApplicationUserPoolId"]); err != nil {
+	//	return err
+	//}
+	//
+	//if err := setupOrganization(awsSession, backendOutputs["WebApplicationUserPoolId"], backendOutputs["RemediationLambdaArn"]); err != nil {
+	//	return err
+	//}
+	//
+	//if err := initializeAnalysisSets(awsSession, backendOutputs["AnalysisApiEndpoint"], &config); err != nil {
+	//	return err
+	//}
+	//
+	//color.Yellow("\nPanther URL = https://%s\n", backendOutputs["LoadBalancerUrl"])
+	fmt.Println("Deploy duration: ", time.Since(start))
 	return nil
+}
+
+// Deploy prereq stack.
+func deployPrereq(awsSession *session.Session, params prereqParameters) (map[string]string, error) {
+	var err error
+
+	// Create a self-signed cert if none was specified
+	if params.CertificateArn == "" {
+		params.CertificateArn, err = uploadLocalCertificate(awsSession)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	paramMap := map[string]string{
+		"AccessLogsBucketName": params.AccessLogsBucketName,
+		"CertificateArn":       params.CertificateArn,
+	}
+
+	outputs, err := deployTemplate(awsSession, prereqTemplate, prereqStack, paramMap)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := enableTOTP(awsSession, outputs["UserPoolId"]); err != nil {
+		return nil, err
+	}
+
+	return outputs, nil
+}
+
+// Enable software 2FA for the Cognito user pool - this is not yet supported in CloudFormation.
+func enableTOTP(awsSession *session.Session, userPoolID string) error {
+	if mg.Verbose() {
+		fmt.Printf("deploy: enabling TOTP for user pool %s\n", userPoolID)
+	}
+
+	client := cognitoidentityprovider.New(awsSession)
+	_, err := client.SetUserPoolMfaConfig(&cognitoidentityprovider.SetUserPoolMfaConfigInput{
+		MfaConfiguration: aws.String("ON"),
+		SoftwareTokenMfaConfiguration: &cognitoidentityprovider.SoftwareTokenMfaConfigType{
+			Enabled: aws.Bool(true),
+		},
+		UserPoolId: &userPoolID,
+	})
+	return err
 }
 
 // Generate the set of deploy parameters for the main application stack.
 //
 // This will first upload the layer zipfile unless a custom layer is specified.
-func getBackendDeployParams(awsSession *session.Session, config *PantherConfig, bucket string) (map[string]string, error) {
-	v := config.BackendParameterValues
-	result := map[string]string{
-		"CloudWatchLogRetentionDays":   strconv.Itoa(v.CloudWatchLogRetentionDays),
-		"Debug":                        strconv.FormatBool(v.Debug),
-		"LayerVersionArns":             v.LayerVersionArns,
-		"PythonLayerVersionArn":        v.PythonLayerVersionArn,
-		"WebApplicationCertificateArn": v.WebApplicationCertificateArn,
-		"TracingMode":                  v.TracingMode,
-	}
-
-	// If no custom Python layer is defined, then we need to build the default one.
-	if result["PythonLayerVersionArn"] == "" {
-		version, err := uploadLayer(awsSession, config.PipLayer, bucket, layerS3ObjectKey)
-		if err != nil {
-			return nil, err
-		}
-		result["PythonLayerKey"] = layerS3ObjectKey
-		result["PythonLayerObjectVersion"] = version
-	}
-
-	if result["WebApplicationCertificateArn"] == "" {
-		certificateArn, err := uploadLocalCertificate(awsSession)
-		if err != nil {
-			return nil, err
-		}
-		result["WebApplicationCertificateArn"] = certificateArn
-	}
-
-	return result, nil
-}
+//func getBackendDeployParams(awsSession *session.Session, config *PantherConfig, bucket string) (map[string]string, error) {
+//	v := config.BackendParameterValues
+//	result := map[string]string{
+//		"CloudWatchLogRetentionDays":   strconv.Itoa(v.CloudWatchLogRetentionDays),
+//		"Debug":                        strconv.FormatBool(v.Debug),
+//		"LayerVersionArns":             v.LayerVersionArns,
+//		"PythonLayerVersionArn":        v.PythonLayerVersionArn,
+//		"WebApplicationCertificateArn": v.WebApplicationCertificateArn,
+//		"TracingMode":                  v.TracingMode,
+//	}
+//
+//	// If no custom Python layer is defined, then we need to build the default one.
+//	if result["PythonLayerVersionArn"] == "" {
+//		version, err := uploadLayer(awsSession, config.PipLayer, bucket, layerS3ObjectKey)
+//		if err != nil {
+//			return nil, err
+//		}
+//		result["PythonLayerKey"] = layerS3ObjectKey
+//		result["PythonLayerObjectVersion"] = version
+//	}
+//
+//	if result["WebApplicationCertificateArn"] == "" {
+//		certificateArn, err := uploadLocalCertificate(awsSession)
+//		if err != nil {
+//			return nil, err
+//		}
+//		result["WebApplicationCertificateArn"] = certificateArn
+//	}
+//
+//	return result, nil
+//}
 
 func getFrontendDeployParams(image string, backendOutputs map[string]string) map[string]string {
 	// If there are params declared in config, we should make sure to add them as well. Currently there are none.
@@ -270,23 +324,6 @@ func cfnPackage(templateFile, bucket, stack string) (string, error) {
 	fmt.Printf("deploy: cloudformation package %s => %s\n", templateFile, pkgOut)
 	_, err := sh.Output("aws", args...)
 	return pkgOut, err
-}
-
-// Enable software 2FA for the Cognito user pool - this is not yet supported in CloudFormation.
-func enableTOTP(awsSession *session.Session, userPoolID string) error {
-	if mg.Verbose() {
-		fmt.Printf("deploy: enabling TOTP for user pool %s\n", userPoolID)
-	}
-
-	client := cognitoidentityprovider.New(awsSession)
-	_, err := client.SetUserPoolMfaConfig(&cognitoidentityprovider.SetUserPoolMfaConfigInput{
-		MfaConfiguration: aws.String("ON"),
-		SoftwareTokenMfaConfiguration: &cognitoidentityprovider.SoftwareTokenMfaConfigType{
-			Enabled: aws.Bool(true),
-		},
-		UserPoolId: &userPoolID,
-	})
-	return err
 }
 
 // If the Admin group is empty (e.g. on the initial deploy), create the initial admin user and organization

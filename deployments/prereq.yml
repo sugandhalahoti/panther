@@ -165,6 +165,34 @@ Resources:
                   - ecr:ListTagsForResource
                 Resource: '*'
 
+  AppsyncServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Appsync service role which invokes API lambdas and gateways and writes CloudWatch logs
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: appsync.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSAppSyncPushToCloudWatchLogs
+      Policies:
+        - PolicyName: InvokeLegacyApis
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-*-api
+        - PolicyName: InvokeGatewayApis
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: execute-api:Invoke
+                Resource: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:*
+
   ########## KMS ##########
   QueueEncryptionKey:
     Type: AWS::KMS::Key
@@ -396,16 +424,109 @@ Resources:
       ListenerArn: !Ref PublicLoadBalancerListener
       Priority: 1
 
+  ########## Cognito ##########
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: Welcome to Panther!
+          EmailMessage: !Sub |
+            <br />Welcome to Panther! We're very excited to have you on board!
+            <br />
+            <br />To get started, sign in to your <a href="https://${PublicLoadBalancer.DNSName}/sign-in">Panther dashboard</a> with the following temporary credentials:
+            <br />
+            <br />* Username: {username}
+            <br />* Password: {####}
+            <br />
+            <br />Need help, or have questions? Just email us at support@runpanther.io, we'd love to help.
+            <br />
+            <br />Yours truly,
+            <br />Panther - runpanther.io
+            <br />
+            <br /><small>Copyright © 2020 Panther Labs Inc. All rights reserved.</small>
+      MfaConfiguration: 'ON'
+      AutoVerifiedAttributes:  # Attributes you want the user to verify (poor naming choice by AWS)
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+      Schema:
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Name: email
+          Required: true
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Name: given_name
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Name: family_name
+      UsernameAttributes:
+        - email
+      UserPoolName: panther-users
+      SmsConfiguration:
+        ExternalId: !Sub panther-${AWS::AccountId}-${AWS::Region}
+        SnsCallerArn: !GetAtt CognitoSNSRole.Arn
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      Description: Administrator for Panther web application
+      GroupName: Admin
+      Precedence: 0
+      UserPoolId: !Ref UserPool
+
+  AppClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: Panther
+      GenerateSecret: false
+      RefreshTokenValidity: 1
+      UserPoolId: !Ref UserPool
+      WriteAttributes:
+        - email
+        - given_name
+        - family_name
+
+  ########## AppSync ##########
+  GraphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      Name: panther-graphql-api
+      AuthenticationType: AMAZON_COGNITO_USER_POOLS
+      UserPoolConfig:
+        AwsRegion: !Ref AWS::Region
+        UserPoolId: !Ref UserPool
+        DefaultAction: ALLOW
+      LogConfig:
+        CloudWatchLogsRoleArn: !GetAtt AppsyncServiceRole.Arn
+        FieldLogLevel: ALL
+
 Outputs:
-  LogBucketName:
-    Description: S3 bucket name for Panther S3 access logs
-    Value: !If [CreateLogBucket, !Ref AccessLogsBucket, !Ref AccessLogsBucketName]
-  SourceBucketName:
-    Description: S3 bucket name for Panther CloudFormation packaging
-    Value: !Ref SourceBucket
+  CertificateArn:
+    Description: Web application certificate
+    Value: !Ref CertificateArn
+  GraphQLApiEndpoint:
+    Description: The URL to the Appsync GraphQL Endpoint
+    Value: !GetAtt GraphQLApi.GraphQLUrl
   ImageRepo:
     Description: The name of the registry hosting the panther web image
     Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/panther-web
   LoadBalancerUrl:
     Description: The URL of the ALB
     Value: !GetAtt PublicLoadBalancer.DNSName
+  LogBucketName:
+    Description: S3 bucket name for Panther S3 access logs
+    Value: !If [CreateLogBucket, !Ref AccessLogsBucket, !Ref AccessLogsBucketName]
+  UserPoolId:
+    Description: Cognito user pool ID
+    Value: !Ref UserPool

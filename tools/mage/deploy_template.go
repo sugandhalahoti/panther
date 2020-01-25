@@ -35,17 +35,18 @@ const (
 	pollTimeout  = time.Hour       // Give up if CreateChangeSet or ExecuteChangeSet takes longer than this
 )
 
-// Deploy a CloudFormation template.
+// Deploy a CloudFormation template, returning the stack outputs.
 //
 // This is our own implementation of "cloudformation deploy" from the AWS CLI.
 // Here we have more control over the output and waiters.
-func deployTemplate(awsSession *session.Session, templateFile, stack string, params map[string]string) error {
+func deployTemplate(awsSession *session.Session, templateFile, stack string, params map[string]string) (map[string]string, error) {
 	changeSet, err := createChangeSet(awsSession, templateFile, stack, params)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if changeSet == "" {
-		return nil // nothing to do
+		// no changes - get current outputs
+		return getStackOutputs(awsSession, stack)
 	}
 	return executeChangeSet(awsSession, changeSet, stack)
 }
@@ -145,14 +146,14 @@ func createChangeSet(awsSession *session.Session, templateFile, stack string, pa
 	return "", fmt.Errorf("create-change-set failed: timeout %s", pollTimeout)
 }
 
-func executeChangeSet(awsSession *session.Session, changeSet, stack string) error {
+func executeChangeSet(awsSession *session.Session, changeSet, stack string) (map[string]string, error) {
 	client := cloudformation.New(awsSession)
 	_, err := client.ExecuteChangeSet(&cloudformation.ExecuteChangeSetInput{
 		ChangeSetName: &changeSet,
 		StackName:     &stack,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Wait for change set to finish.
@@ -166,10 +167,10 @@ func executeChangeSet(awsSession *session.Session, changeSet, stack string) erro
 				if awsErr.Code() == "ExpiredToken" {
 					fmt.Printf("deploy: %s: ExecuteChangeSet: security token expired, exiting.\n"+
 						"Re-executing the deploy command with fresh credentials will pick up where the previous deployment finished.\n", stack)
-					return err
+					return nil, err
 				}
 			}
-			return err
+			return nil, err
 		}
 
 		status := *response.Stacks[0].StackStatus
@@ -179,15 +180,15 @@ func executeChangeSet(awsSession *session.Session, changeSet, stack string) erro
 		}
 
 		if status == "CREATE_COMPLETE" || status == "UPDATE_COMPLETE" {
-			return nil // success!
+			return mapStackOutputs(response.Stacks[0].Outputs), nil // success!
 		} else if strings.Contains(status, "IN_PROGRESS") {
 			// TODO - show progress of nested stacks (e.g. % updated)
 			time.Sleep(pollInterval)
 		} else {
-			return fmt.Errorf("execute-change-set failed: %s: %s",
+			return nil, fmt.Errorf("execute-change-set failed: %s: %s",
 				status, aws.StringValue(response.Stacks[0].StackStatusReason))
 		}
 	}
 
-	return fmt.Errorf("execute-change-set failed: timeout %s", pollTimeout)
+	return nil, fmt.Errorf("execute-change-set failed: timeout %s", pollTimeout)
 }
