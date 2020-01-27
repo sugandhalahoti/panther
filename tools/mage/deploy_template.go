@@ -21,6 +21,7 @@ package mage
 import (
 	"fmt"
 	"io/ioutil"
+	"os"
 	"strings"
 	"time"
 
@@ -31,6 +32,10 @@ import (
 )
 
 const (
+	// Maximum size of cfn template that can be deployed locally.
+	// Larger templates must first be uploaded to S3.
+	cfnMaxLocalTemplateSize = 51200
+
 	pollInterval = 5 * time.Second // How long to wait in between requests to the CloudFormation service
 	pollTimeout  = time.Hour       // Give up if CreateChangeSet or ExecuteChangeSet takes longer than this
 )
@@ -39,8 +44,8 @@ const (
 //
 // This is our own implementation of "cloudformation deploy" from the AWS CLI.
 // Here we have more control over the output and waiters.
-func deployTemplate(awsSession *session.Session, templateFile, stack string, params map[string]string) (map[string]string, error) {
-	changeSet, err := createChangeSet(awsSession, templateFile, stack, params)
+func deployTemplate(awsSession *session.Session, templateFile, stack, bucket string, params map[string]string) (map[string]string, error) {
+	changeSet, err := createChangeSet(awsSession, templateFile, stack, bucket, params)
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +59,7 @@ func deployTemplate(awsSession *session.Session, templateFile, stack string, par
 // Create a CloudFormation change set, returning its name.
 //
 // If there are no pending changes, the change set is deleted and a blank name is returned.
-func createChangeSet(awsSession *session.Session, templateFile, stack string, params map[string]string) (string, error) {
+func createChangeSet(awsSession *session.Session, templateFile, stack, bucket string, params map[string]string) (string, error) {
 	// Change set name - username + unix time (must be unique)
 	changeSetName := fmt.Sprintf("panther-%d", time.Now().UnixNano())
 
@@ -79,7 +84,7 @@ func createChangeSet(awsSession *session.Session, templateFile, stack string, pa
 		})
 	}
 
-	templateBody, err := ioutil.ReadFile(templateFile)
+	stat, err := os.Stat(templateFile)
 	if err != nil {
 		return "", err
 	}
@@ -101,11 +106,27 @@ func createChangeSet(awsSession *session.Session, templateFile, stack string, pa
 				Value: aws.String("Panther"),
 			},
 		},
-		TemplateBody: aws.String(string(templateBody)),
+	}
+
+	if stat.Size() <= cfnMaxLocalTemplateSize {
+		// cfn template can be included directly
+		templateBody, err := ioutil.ReadFile(templateFile)
+		if err != nil {
+			return "", err
+		}
+		createInput.TemplateBody = aws.String(string(templateBody))
+	} else {
+		// cfn template must first be uploaded to S3
+		output, err := uploadFileToS3(awsSession, templateFile, bucket, stack+"/template.yml", nil)
+		if err != nil {
+			return "", err
+		}
+		fmt.Println("upload location", output.Location)
+		createInput.TemplateURL = &output.Location
 	}
 
 	if _, err = client.CreateChangeSet(createInput); err != nil {
-		return "", err
+		return "", fmt.Errorf("create change set failed: %v", err)
 	}
 
 	// Wait for change set creation to finish
@@ -119,7 +140,8 @@ func createChangeSet(awsSession *session.Session, templateFile, stack string, pa
 
 		status := aws.StringValue(response.Status)
 		reason := aws.StringValue(response.StatusReason)
-		if status == "FAILED" && strings.HasPrefix(reason, "The submitted information didn't contain changes") {
+		if status == "FAILED" && (strings.HasPrefix(reason, "The submitted information didn't contain changes") ||
+			strings.HasPrefix(reason, "No updates are to be performed")) {
 			fmt.Printf("deploy: %s: no changes needed\n", stack)
 			_, err := client.DeleteChangeSet(&cloudformation.DeleteChangeSetInput{
 				ChangeSetName: &changeSetName,

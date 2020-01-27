@@ -77,6 +77,35 @@ func Deploy() error {
 	fmt.Println("stack outputs", preOutputs)
 
 	// TODO - now we can build the docker image in parallel with the deployment of the main stacks
+	if err = Build.Lambda(Build{}); err != nil {
+		return err
+	}
+
+	fmt.Println("embedding swagger")
+	api, err := embedAPI("deployments/api_gateway.yml")
+	if err != nil {
+		return err
+	}
+
+	sourceBucket := preOutputs["SourceBucketName"]
+	packaged, err := cfnPackage(api, sourceBucket, "panther-api-gateway")
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("original: %s, embedded: %s, packaged: %s\n", "deployments/api_gateway.yml", api, packaged)
+	params := map[string]string{
+		"S3BucketAccessLogs": preOutputs["LogBucketName"],
+		"SQSKeyId":           preOutputs["SQSKeyId"],
+		// TODO - add any values here from the config file
+	}
+
+	apiOutputs, err := deployTemplate(awsSession, packaged, "panther-api-gateway", sourceBucket, params)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("api outputs", apiOutputs)
 
 	//bucketParams := map[string]string{
 	//	"AccessLogsBucketName": config.BucketsParameterValues.AccessLogsBucketName,
@@ -176,7 +205,7 @@ func deployPrereq(awsSession *session.Session, params prereqParameters) (map[str
 		"CertificateArn":       params.CertificateArn,
 	}
 
-	outputs, err := deployTemplate(awsSession, prereqTemplate, prereqStack, paramMap)
+	outputs, err := deployTemplate(awsSession, prereqTemplate, prereqStack, "", paramMap)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +331,10 @@ func uploadLayer(awsSession *session.Session, libs []string, bucket, key string)
 // Upload resources to S3 and return the path to the modified CloudFormation template.
 // TODO - replace this with our own to avoid relying on the aws cli
 func cfnPackage(templateFile, bucket, stack string) (string, error) {
-	outputDir := path.Join("out", path.Dir(templateFile))
+	outputDir := path.Dir(templateFile)
+	if !strings.HasPrefix(outputDir, "out") {
+		outputDir = path.Join("out", outputDir)
+	}
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return "", err
 	}

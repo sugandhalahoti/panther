@@ -56,6 +56,9 @@ Mappings:
     ResourcesAPI:
       MemoryMB: 512
       TimeoutSec: 180
+    RemediationAPI:
+      MemoryMB: 512
+      TimeoutSec: 180
 
 Conditions:
   AttachLayers: !Not [!Equals [!Join ['', !Ref LayerVersionArns], '']]
@@ -402,6 +405,82 @@ Resources:
                 - kms:GenerateDataKey
               Resource: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
 
+  ########## Remediation API ##########
+  RemediationApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      DefinitionBody: api/gateway/remediation/api.yml
+      EndpointConfiguration: REGIONAL
+      Name: panther-remediation-api
+      StageName: v1
+      TracingEnabled: !If [TracingEnabled, true, false]
+
+  RemediationGatewayInvocationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref RemediationHandlerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RemediationApi}/*
+
+  RemediationHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../bin/internal/compliance/remediation_api/main
+      Description: Triggers AWS remediations
+      Environment:
+        Variables:
+          DEBUG: !Ref Debug
+          REMEDIATION_LAMBDA_ARN: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-aws-remediation
+          SQS_QUEUE_URL: !Sub https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/panther-remediation-queue
+          POLICIES_SERVICE_HOSTNAME: !Sub '${AnalysisApi}.execute-api.${AWS::Region}.amazonaws.com'
+          POLICIES_SERVICE_PATH: v1
+          RESOURCES_SERVICE_HOSTNAME: !Sub '${ResourcesApi}.execute-api.${AWS::Region}.amazonaws.com'
+          RESOURCES_SERVICE_PATH: v1
+      FunctionName: panther-remediation-api
+      Handler: main
+      Layers: !If [AttachLayers, !Ref LayerVersionArns, !Ref 'AWS::NoValue']
+      MemorySize: !FindInMap [Lambda, RemediationAPI, MemoryMB]
+      Runtime: go1.x
+      Timeout: !FindInMap [Lambda, RemediationAPI, TimeoutSec]
+      Tracing: !If [TracingEnabled, !Ref TracingMode, !Ref 'AWS::NoValue']
+      Policies:
+        - !If [TracingEnabled, 'arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess', !Ref 'AWS::NoValue']
+        -
+          Id: SendSqsMessages
+          Version: 2012-10-17
+          Statement:
+            -
+              Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
+            -
+              Effect: Allow
+              Action:
+                - sqs:SendMessage
+                - sqs:SendMessageBatch
+              Resource: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:panther-remediation-queue
+        -
+          Id: InvokeAPIs
+          Version: 2012-10-17
+          Statement:
+            -
+              Effect: Allow
+              Action: execute-api:Invoke
+              Resource:
+                - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AnalysisApi}/v1/GET/policy
+                - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ResourcesApi}/v1/GET/resource
+        -
+          Id: TriggerRemediations
+          Version: 2012-10-17
+          Statement:
+            -
+              Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-aws-remediation
+
 Outputs:
   AnalysisBucketName:
     Description: The name of the S3 analysis bucket
@@ -415,3 +494,6 @@ Outputs:
   ResourcesGatewayId:
     Description: API Gateway ID for resources-api
     Value: !Ref ResourcesApi
+  RemediationGatewayId:
+    Description: API Gateway ID for remediation-api
+    Value: !Ref RemediationApi
