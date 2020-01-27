@@ -1,0 +1,417 @@
+# Panther is a scalable, powerful, cloud-native SIEM written in Golang/React.
+# Copyright (C) 2020 Panther Labs Inc
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: API gateways and their Lambda handlers
+
+Parameters:
+  CloudWatchLogRetentionDays:
+    Type: Number
+    Description: CloudWatch log retention period
+    Default: 365
+  Debug:
+    Type: String
+    Description: Toggle debug logging for all Lambda functions
+    Default: false
+    AllowedValues: [true, false]
+  LayerVersionArns:
+    Type: CommaDelimitedList
+    Description: List of LayerVersion ARNs to attach to every function
+    Default: ''
+  TracingMode:
+    Type: String
+    Description: Enable XRay tracing on Lambda and API Gateway
+    AllowedValues: ['', Active, PassThrough]
+    Default: ''
+
+  S3BucketAccessLogs:
+    Type: String
+    Description: S3 bucket for storing S3 access logs
+  SQSKeyId:
+    Type: String
+    Description: KMS key ID for SQS encryption
+
+Mappings:
+  Lambda:
+    AnalysisAPI:
+      MemoryMB: 512
+      TimeoutSec: 180
+    ComplianceAPI:
+      MemoryMB: 512
+      TimeoutSec: 180
+    ResourcesAPI:
+      MemoryMB: 512
+      TimeoutSec: 180
+
+Conditions:
+  AttachLayers: !Not [!Equals [!Join ['', !Ref LayerVersionArns], '']]
+  TracingEnabled: !Not [!Equals ['', !Ref TracingMode]]
+
+Resources:
+  GatewayLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: API Gateway uses this role to publish logs to CloudWatch
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  GatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt GatewayLoggingRole.Arn
+
+  ########## Compliance API ##########
+  ComplianceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: panther-compliance
+      AttributeDefinitions:
+        - AttributeName: policyId
+          AttributeType: S
+        - AttributeName: resourceId
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      GlobalSecondaryIndexes:
+        - # Add an index for policyId to efficiently search for a specific policy
+          KeySchema:
+            - AttributeName: policyId
+              KeyType: HASH
+          IndexName: policy-index
+          Projection:
+            ProjectionType: ALL
+      KeySchema:
+        - AttributeName: resourceId
+          KeyType: HASH
+        - AttributeName: policyId
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: True
+      SSESpecification:
+        SSEEnabled: True
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: True
+
+  ComplianceApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      DefinitionBody: api/gateway/compliance/api.yml
+      EndpointConfiguration: REGIONAL
+      Name: panther-compliance-api
+      StageName: v1
+      TracingEnabled: !If [TracingEnabled, true, false]
+
+  ComplianceGatewayInvocationPermission:  # allow API gateway to invoke the Lambda function
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ComplianceHandlerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/*
+
+  ComplianceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/panther-compliance-api
+      RetentionInDays: !Ref CloudWatchLogRetentionDays
+
+  ComplianceHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../bin/internal/compliance/compliance_api/main
+      Description: Compliance API
+      Environment:
+        Variables:
+          COMPLIANCE_TABLE: !Ref ComplianceTable
+          DEBUG: !Ref Debug
+          INDEX_NAME: policy-index
+      FunctionName: panther-compliance-api
+      Handler: main
+      MemorySize: !FindInMap [Lambda, ComplianceAPI, MemoryMB]
+      Runtime: go1.x
+      Layers: !If [AttachLayers, !Ref LayerVersionArns, !Ref 'AWS::NoValue']
+      Timeout: !FindInMap [Lambda, AnalysisAPI, TimeoutSec]
+      Tracing: !If [TracingEnabled, !Ref TracingMode, !Ref 'AWS::NoValue']
+      Policies:
+        - !If [TracingEnabled, 'arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess', !Ref 'AWS::NoValue']
+        - Id: DynamoManageItems
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:*Item
+                - dynamodb:Scan
+              Resource:
+                - !GetAtt ComplianceTable.Arn
+                - !Sub
+                  - '${arn}/index/*'
+                  - { arn: !GetAtt ComplianceTable.Arn }
+
+  ########## Analysis API ##########
+  AnalysisTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: True
+      SSESpecification:
+        SSEEnabled: True
+      TableName: panther-analysis
+
+  AnalysisBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Sub panther-analysis-versions-${AWS::AccountId}-${AWS::Region}
+      LifecycleConfiguration:
+        Rules:
+          - NoncurrentVersionExpirationInDays: 365
+            Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3BucketAccessLogs
+        LogFilePrefix: !Sub panther-analysis-versions-${AWS::AccountId}-${AWS::Region}/
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  AnalysisApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      DefinitionBody: api/gateway/analysis/api.yml
+      EndpointConfiguration: REGIONAL
+      Name: panther-analysis-api
+      StageName: v1
+      TracingEnabled: !If [TracingEnabled, true, false]
+
+  AnalysisGatewayInvocationPermission:  # allow API gateway to invoke the Lambda function
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AnalysisHandlerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${AnalysisApi}/*
+
+  AnalysisLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/panther-analysis-api
+      RetentionInDays: !Ref CloudWatchLogRetentionDays
+
+  AnalysisHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../bin/internal/core/analysis_api/main
+      Description: Analysis API
+      Environment:
+        Variables:
+          BUCKET: !Ref AnalysisBucket
+          COMPLIANCE_API_HOST: !Sub '${ComplianceApi}.execute-api.${AWS::Region}.amazonaws.com'
+          COMPLIANCE_API_PATH: v1
+          DEBUG: !Ref Debug
+          POLICY_ENGINE: panther-policy-engine
+          RULES_ENGINE: panther-rules-engine
+          RESOURCE_QUEUE_URL: !Sub https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/panther-resources
+          TABLE: !Ref AnalysisTable
+      FunctionName: panther-analysis-api
+      Handler: main
+      MemorySize: !FindInMap [Lambda, AnalysisAPI, MemoryMB]
+      Layers: !If [AttachLayers, !Ref LayerVersionArns, !Ref 'AWS::NoValue']
+      Runtime: go1.x
+      Timeout: !FindInMap [Lambda, AnalysisAPI, TimeoutSec]
+      Tracing: !If [TracingEnabled, !Ref TracingMode, !Ref 'AWS::NoValue']
+      Policies:
+        - !If [TracingEnabled, 'arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess', !Ref 'AWS::NoValue']
+        - Id: InvokeApis
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action: execute-api:Invoke
+              Resource:
+                - !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/GET/describe-org
+                - !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/POST/delete
+                - !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/POST/update
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-policy-engine
+                - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-rules-engine
+        - Id: ManageDataStores
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:*Item
+                - dynamodb:Query
+                - dynamodb:Scan
+              Resource: !GetAtt AnalysisTable.Arn
+            - Effect: Allow
+              Action:
+                - s3:DeleteObject  # Does NOT grant permission to permanently delete versions
+                - s3:GetObject*
+                - s3:PutObject
+              Resource: !Sub arn:${AWS::Partition}:s3:::${AnalysisBucket}/*
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:ListBucketVersions
+              Resource: !GetAtt AnalysisBucket.Arn
+        - Id: PublishToResourceQueue
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+                - sqs:SendMessageBatch
+              Resource: !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:panther-resources
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
+
+  ########## Resources API ##########
+  ResourcesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: panther-resources
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: True
+      SSESpecification:
+        SSEEnabled: True
+      TimeToLiveSpecification:  # Deleted resources are expired after 30 days
+        AttributeName: expiresAt
+        Enabled: true
+
+  ResourcesApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      DefinitionBody: api/gateway/resources/api.yml
+      EndpointConfiguration: REGIONAL
+      Name: panther-resources-api
+      StageName: v1
+      TracingEnabled: !If [TracingEnabled, true, false]
+
+  ResourcesGatewayInvocationPermission:  # allow API gateway to invoke the Lambda function
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ResourcesHandlerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ResourcesApi}/*
+
+  ResourcesLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/panther-resources-api
+      RetentionInDays: !Ref CloudWatchLogRetentionDays
+
+  ResourcesHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../bin/internal/compliance/resources_api/main
+      Description: Resources API
+      Environment:
+        Variables:
+          COMPLIANCE_API_HOST: !Sub '${ComplianceApi}.execute-api.${AWS::Region}.amazonaws.com'
+          COMPLIANCE_API_PATH: v1
+          DEBUG: !Ref Debug
+          RESOURCES_QUEUE_URL: !Sub https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/panther-resources
+          RESOURCES_TABLE: !Ref ResourcesTable
+      FunctionName: panther-resources-api
+      Handler: main
+      Layers: !If [AttachLayers, !Ref LayerVersionArns, !Ref 'AWS::NoValue']
+      MemorySize: !FindInMap [Lambda, ResourcesAPI, MemoryMB]
+      Runtime: go1.x
+      Timeout: !FindInMap [Lambda, ResourcesAPI, TimeoutSec]
+      Tracing: !If [TracingEnabled, !Ref TracingMode, !Ref 'AWS::NoValue']
+      Policies:
+        - !If [TracingEnabled, 'arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess', !Ref 'AWS::NoValue']
+        -
+          Id: AccessComplianceApi
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action: execute-api:Invoke
+              Resource:
+                - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/GET/describe-org
+                - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/POST/delete
+        -
+          Id: DynamoManageItems
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:*Item
+              Resource: !GetAtt ResourcesTable.Arn
+        -
+          Id: PublishToResourceQueue
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+                - sqs:SendMessageBatch
+              Resource: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:panther-resources
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
+
+Outputs:
+  AnalysisBucketName:
+    Description: The name of the S3 analysis bucket
+    Value: !Ref AnalysisBucket
+  AnalysisGatewayId:
+    Description: API Gateway ID for analysis-api
+    Value: !Ref AnalysisApi
+  ComplianceGatewayId:
+    Description: API Gateway ID for compliance-api
+    Value: !Ref ComplianceApi
+  ResourcesGatewayId:
+    Description: API Gateway ID for resources-api
+    Value: !Ref ResourcesApi

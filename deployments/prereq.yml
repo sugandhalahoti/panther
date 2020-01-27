@@ -94,25 +94,6 @@ Resources:
         Status: Enabled
 
   ########## IAM ##########
-  GatewayLoggingRole:
-    Type: AWS::IAM::Role
-    Properties:
-      Description: API Gateway uses this role to publish logs to CloudWatch
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: apigateway.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
-
-  GatewayAccount:
-    Type: AWS::ApiGateway::Account
-    Properties:
-      CloudWatchRoleArn: !GetAtt GatewayLoggingRole.Arn
-
   CognitoSNSRole:
     Type: AWS::IAM::Role
     Properties:
@@ -527,6 +508,12 @@ Outputs:
   LogBucketName:
     Description: S3 bucket name for Panther S3 access logs
     Value: !If [CreateLogBucket, !Ref AccessLogsBucket, !Ref AccessLogsBucketName]
+  SourceBucketName:
+    Description: S3 bucket name for Panther S3 cloudformation + lambda source
+    Value: !Ref SourceBucket
+  SQSKeyId:
+    Description: KMS key for encrypting Panther SQS queues
+    Value: !Ref QueueEncryptionKey
   UserPoolId:
     Description: Cognito user pool ID
     Value: !Ref UserPool
