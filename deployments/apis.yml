@@ -59,6 +59,9 @@ Mappings:
     RemediationAPI:
       MemoryMB: 512
       TimeoutSec: 180
+    IntegrationsAPI:
+      MemoryMB: 128
+      TimeoutSec: 180
 
 Conditions:
   AttachLayers: !Not [!Equals [!Join ['', !Ref LayerVersionArns], '']]
@@ -227,7 +230,7 @@ Resources:
       Action: lambda:InvokeFunction
       FunctionName: !Ref AnalysisHandlerFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${AnalysisApi}/*
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AnalysisApi}/*
 
   AnalysisLogGroup:
     Type: AWS::Logs::LogGroup
@@ -265,14 +268,14 @@ Resources:
             - Effect: Allow
               Action: execute-api:Invoke
               Resource:
-                - !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/GET/describe-org
-                - !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/POST/delete
-                - !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/POST/update
+                - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/GET/describe-org
+                - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/POST/delete
+                - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ComplianceApi}/v1/POST/update
             - Effect: Allow
               Action: lambda:InvokeFunction
               Resource:
-                - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-policy-engine
-                - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-rules-engine
+                - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-policy-engine
+                - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-rules-engine
         - Id: ManageDataStores
           Version: 2012-10-17
           Statement:
@@ -287,7 +290,7 @@ Resources:
                 - s3:DeleteObject  # Does NOT grant permission to permanently delete versions
                 - s3:GetObject*
                 - s3:PutObject
-              Resource: !Sub arn:${AWS::Partition}:s3:::${AnalysisBucket}/*
+              Resource: !Sub arn:aws:s3:::${AnalysisBucket}/*
             - Effect: Allow
               Action:
                 - s3:ListBucket
@@ -300,12 +303,12 @@ Resources:
               Action:
                 - sqs:SendMessage
                 - sqs:SendMessageBatch
-              Resource: !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:panther-resources
+              Resource: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:panther-resources
             - Effect: Allow
               Action:
                 - kms:Decrypt
                 - kms:GenerateDataKey
-              Resource: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
+              Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
 
   ########## Resources API ##########
   ResourcesTable:
@@ -403,7 +406,7 @@ Resources:
               Action:
                 - kms:Decrypt
                 - kms:GenerateDataKey
-              Resource: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
+              Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
 
   ########## Remediation API ##########
   RemediationApi:
@@ -422,6 +425,12 @@ Resources:
       FunctionName: !Ref RemediationHandlerFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RemediationApi}/*
+
+  RemediationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/panther-remediation-api
+      RetentionInDays: !Ref CloudWatchLogRetentionDays
 
   RemediationHandlerFunction:
     Type: AWS::Serverless::Function
@@ -455,7 +464,7 @@ Resources:
               Action:
                 - kms:Decrypt
                 - kms:GenerateDataKey
-              Resource: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
+              Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
             -
               Effect: Allow
               Action:
@@ -480,6 +489,86 @@ Resources:
               Effect: Allow
               Action: lambda:InvokeFunction
               Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:panther-aws-remediation
+  
+  ########## Integrations (Snapshot) API ##########
+  IntegrationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: panther-source-integrations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: integrationId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: integrationId
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: True
+      SSESpecification:  # Enable server-side encryption
+        SSEEnabled: True
+
+  IntegrationsHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../out/bin/internal/compliance/snapshot_api/main
+      Description: Manages database of source integrations
+      Environment:
+        Variables:
+          DEBUG: !Ref Debug
+          SNAPSHOT_POLLERS_QUEUE_URL: !Sub https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/panther-snapshot-queue
+          LOG_PROCESSOR_QUEUE_URL: !Sub https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/panther-input-data-notifications
+          LOG_PROCESSOR_QUEUE_ARN: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:panther-input-data-notifications
+          TABLE_NAME: !Ref IntegrationsTable
+      FunctionName: panther-snapshot-api
+      Handler: main
+      Layers: !If [AttachLayers, !Ref LayerVersionArns, !Ref 'AWS::NoValue']
+      MemorySize: !FindInMap [Lambda, IntegrationsAPI, MemoryMB]
+      Runtime: go1.x
+      Timeout: !FindInMap [Lambda, IntegrationsAPI, TimeoutSec]
+      Tracing: !If [TracingEnabled, !Ref TracingMode, !Ref 'AWS::NoValue']
+      Policies:
+        - !If [TracingEnabled, 'arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess', !Ref 'AWS::NoValue']
+        -
+          Id: IntegrationsTablePermissions
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:*Item
+                - dynamodb:Query
+                - dynamodb:Scan
+              Resource: !GetAtt IntegrationsTable.Arn
+        -
+          Id: SendSQSMessages
+          Version: 2012-10-17
+          Statement:
+            -
+              Effect: Allow
+              Action:
+                - sqs:SendMessage
+                - sqs:SendMessageBatch
+              Resource: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:panther-snapshot-queue
+            -
+              Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SQSKeyId}
+        -
+          Id: UpdateLogProcessorQueue
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action: sqs:*QueueAttributes
+              Resource: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:panther-input-data-notifications
+
+  IntegrationsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/panther-snapshot-api
+      RetentionInDays: !Ref CloudWatchLogRetentionDays
+
+  ########## 
 
 Outputs:
   AnalysisBucketName:
