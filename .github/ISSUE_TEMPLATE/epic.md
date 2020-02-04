@@ -35,11 +35,13 @@ Requirements for collaboration with our UX designer.
 
 ---
 
-# Programmatic Policy & Rule Updates
+# Example: Programmatic Policy & Rule Updates
 
 ## Introduction
 
-Today, teams use the `panther-cli` to locally test and create analysis packages to upload via the UI. To better accommodate developer workflows when developing Rules and Policies, teams need an automated way to push updates into Panther directly. This feature will add this functionality both into the Panther API and in the CLI.
+Today, teams use the `panther-cli` to locally test and create analysis packages that are then uploaded via the UI.
+
+To better accommodate automated workflows when developing Rules and Policies, teams need an easier way to push into Panther directly.
 
 ## Product requirements
 
