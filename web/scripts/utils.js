@@ -27,9 +27,10 @@ function configureAwsEnvVars() {
 }
 
 function configureSentryVars() {
-  process.env.SENTRY_DSN = 'https://49b0ff18478f4260a02d54332d1e49ca@sentry.io/2271475';
-  process.env.SENTRY_ORG = 'panther-labs';
-  process.env.SENTRY_PROJECT = 'panther-web';
+  const dotenvResult = dotenv.config({ path: 'web/.env.sentry' });
+  if (dotenvResult.error) {
+    throw new Error(chalk.red(dotenvResult.error));
+  }
   process.env.PANTHER_VERSION = execSync('git describe --tags')
     .toString()
     .trim();
