@@ -41,13 +41,6 @@ ADD .babelrc tsconfig.json webpack.config.js ./
 ADD out/.env.aws out/.env.aws
 ADD web web
 
-# Build argument & ENV var for versioning
-ARG PANTHER_VERSION
-ENV PANTHER_VERSION=$PANTHER_VERSION
-
-# Convert NODE_ENV to production in order to adjust webpack configuration accordingly
-ENV NODE_ENV=production
-
 # Build the project (additional ENV vars are read from a .env)
 RUN npm run build
 
