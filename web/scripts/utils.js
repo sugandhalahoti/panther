@@ -1,0 +1,38 @@
+/**
+ * Panther is a scalable, powerful, cloud-native SIEM written in Golang/React.
+ * Copyright (C) 2020 Panther Labs Inc
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+const { execSync } = require('child_process');
+const dotenv = require('dotenv');
+const chalk = require('chalk');
+
+function configureAwsEnvVars() {
+  const dotenvResult = dotenv.config({ path: 'out/.env' });
+  if (dotenvResult.error) {
+    throw new Error(chalk.red(dotenvResult.error));
+  }
+}
+
+function configureSentryVars() {
+  process.env.SENTRY_DSN = 'https://49b0ff18478f4260a02d54332d1e49ca@sentry.io/2271475';
+  process.env.SENTRY_ORG = 'panther-labs';
+  process.env.SENTRY_PROJECT = 'panther-web';
+  process.env.PANTHER_VERSION = execSync('git describe --tags')
+    .toString()
+    .trim();
+}
+
+module.exports = { configureAwsEnvVars, configureSentryVars };
