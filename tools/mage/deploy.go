@@ -118,7 +118,7 @@ func Deploy() error {
 		return err
 	}
 
-	if err := generateDotEnvFromCfnOutputs(awsSession, backendOutputs, "out/.env"); err != nil {
+	if err := generateDotEnvFromCfnOutputs(awsSession, backendOutputs, "out/.env.aws"); err != nil {
 		return err
 	}
 

@@ -20,7 +20,7 @@ const dotenv = require('dotenv');
 const chalk = require('chalk');
 
 function configureAwsEnvVars() {
-  const dotenvResult = dotenv.config({ path: 'out/.env' });
+  const dotenvResult = dotenv.config({ path: 'out/.env.aws' });
   if (dotenvResult.error) {
     throw new Error(chalk.red(dotenvResult.error));
   }
