@@ -22,7 +22,7 @@ FROM node:13.2-alpine AS build-env
 LABEL description="The image that builds the web code and serves it through an express NodeJS server"
 
 # Update debian distro
-RUN apk update && apk add --no-cache --update nasm libtool alpine-sdk autoconf automake
+RUN apk update && apk add --no-cache --update git nasm libtool alpine-sdk autoconf automake
 
 # Move all of our logic
 RUN mkdir /code
