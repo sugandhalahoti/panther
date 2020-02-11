@@ -31,7 +31,7 @@ function configureAwsEnvVars() {
 }
 
 function configureSentryEnvVars() {
-  loadDotEnvVars('out/.env.sentry');
+  loadDotEnvVars('web/.env.sentry');
 }
 
 function getPantherDeploymentVersion() {
