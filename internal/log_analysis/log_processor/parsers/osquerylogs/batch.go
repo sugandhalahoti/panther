@@ -19,10 +19,7 @@ package osquerylogs
  */
 
 import (
-	"fmt"
-
 	jsoniter "github.com/json-iterator/go"
-	"go.uber.org/zap"
 
 	"github.com/panther-labs/panther/internal/log_analysis/log_processor/parsers"
 	"github.com/panther-labs/panther/internal/log_analysis/log_processor/parsers/timestamp"
@@ -31,15 +28,19 @@ import (
 var BatchDesc = `Batch contains all the data included in OsQuery batch logs
 Reference : https://osquery.readthedocs.io/en/stable/deployment/logging/`
 
-type Batch struct {
-	CalendarTime *timestamp.ANSICwithTZ `json:"calendarTime,omitempty" validate:"required"`
-	Counter      *int                   `json:"counter,omitempty,string"  validate:"required"`
-	Decorations  map[string]string      `json:"decorations,omitempty"`
-	DiffResults  *BatchDiffResults      `json:"diffResults,omitempty" validate:"required"`
-	Epoch        *int                   `json:"epoch,omitempty,string"  validate:"required"`
-	Hostname     *string                `json:"hostname,omitempty"  validate:"required"`
-	Name         *string                `json:"name,omitempty"  validate:"required"`
-	UnixTime     *int                   `json:"unixTime,omitempty,string"  validate:"required"`
+// nolint:lll
+type Batch struct { // FIXME: field descriptions need updating!
+	CalendarTime *timestamp.ANSICwithTZ `json:"calendarTime,omitempty" validate:"required" description:"The time of the event (UTC)."`
+	Counter      *int                   `json:"counter,omitempty,string"  validate:"required" description:"Counter"`
+	Decorations  map[string]string      `json:"decorations,omitempty" description:"Decorations"`
+	DiffResults  *BatchDiffResults      `json:"diffResults,omitempty" validate:"required" description:"Computed differences."`
+	Epoch        *int                   `json:"epoch,omitempty,string"  validate:"required" description:"Epoch"`
+	Hostname     *string                `json:"hostname,omitempty"  validate:"required" description:"Hostname"`
+	Name         *string                `json:"name,omitempty"  validate:"required" description:"Name"`
+	UnixTime     *int                   `json:"unixTime,omitempty,string"  validate:"required" description:"Unix epoch"`
+
+	// NOTE: added to end of struct to allow expansion later
+	parsers.PantherLog
 }
 
 // OsqueryBatchDiffResults contains diff data for OsQuery batch results
@@ -51,20 +52,21 @@ type BatchDiffResults struct {
 // BatchParser parses OsQuery Batch logs
 type BatchParser struct{}
 
+func (p *BatchParser) New() parsers.LogParser {
+	return &BatchParser{}
+}
+
 // Parse returns the parsed events or nil if parsing failed
 func (p *BatchParser) Parse(log string) []interface{} {
 	event := &Batch{}
 	err := jsoniter.UnmarshalFromString(log, event)
 	if err != nil {
-		zap.L().Debug("failed to unmarshal log", zap.Error(err))
 		return nil
 	}
 
-	tsa, _ := jsoniter.MarshalToString(event)
-	fmt.Println(tsa)
+	event.updatePantherFields(p)
 
 	if err := parsers.Validator.Struct(event); err != nil {
-		zap.L().Debug("failed to validate log", zap.Error(err))
 		return nil
 	}
 	return []interface{}{event}
@@ -73,4 +75,11 @@ func (p *BatchParser) Parse(log string) []interface{} {
 // LogType returns the log type supported by this parser
 func (p *BatchParser) LogType() string {
 	return "Osquery.Batch"
+}
+
+func (event *Batch) updatePantherFields(p *BatchParser) {
+	if event.CalendarTime != nil {
+		event.SetCoreFields(p.LogType(), timestamp.RFC3339(*event.CalendarTime))
+	}
+	event.AppendAnyDomainNamePtrs(event.Hostname)
 }
