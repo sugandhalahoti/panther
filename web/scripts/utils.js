@@ -19,21 +19,29 @@ const { execSync } = require('child_process');
 const dotenv = require('dotenv');
 const chalk = require('chalk');
 
+function loadDotEnvVars(path) {
+  const dotenvResult = dotenv.config({ path });
+  if (dotenvResult.error) {
+    throw new Error(chalk.red(dotenvResult.error));
+  }
+}
+
 function configureAwsEnvVars() {
-  const dotenvResult = dotenv.config({ path: 'out/.env.aws' });
-  if (dotenvResult.error) {
-    throw new Error(chalk.red(dotenvResult.error));
+  loadDotEnvVars('out/.env.aws');
+}
+
+function configureSentryEnvVars() {
+  loadDotEnvVars('out/.env.sentry');
+}
+
+function getPantherDeploymentVersion() {
+  try {
+    return execSync('git describe --tags')
+      .toString()
+      .trim();
+  } catch (err) {
+    throw new Error(chalk.red(err.message));
   }
 }
 
-function configureSentryVars() {
-  const dotenvResult = dotenv.config({ path: 'web/.env.sentry' });
-  if (dotenvResult.error) {
-    throw new Error(chalk.red(dotenvResult.error));
-  }
-  process.env.PANTHER_VERSION = execSync('git describe --tags')
-    .toString()
-    .trim();
-}
-
-module.exports = { configureAwsEnvVars, configureSentryVars };
+module.exports = { configureAwsEnvVars, configureSentryEnvVars, getPantherDeploymentVersion };

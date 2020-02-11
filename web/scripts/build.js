@@ -14,12 +14,20 @@
  * limitations under the License.
  */
 const { spawn } = require('child_process');
-const { configureAwsEnvVars, configureSentryVars } = require('./utils');
+const {
+  configureAwsEnvVars,
+  configureSentryEnvVars,
+  getPantherDeploymentVersion,
+} = require('./utils');
 
+// Mark the Node environment as production in order to load the webpack configuration
 process.env.NODE_ENV = 'production';
+// Generate  a `PANTHER_VERSION` that the javascript error logging function running in the browser
+// is going to reference when reporting a crash
+process.env.PANTHER_VERSION = getPantherDeploymentVersion();
 
-// Add all the sentry-related vars to process.env
-configureSentryVars();
+// Add all the sentry-related ENV vars to process.env
+configureSentryEnvVars();
 
 // Add all the aws-related ENV vars to process.env
 configureAwsEnvVars();
