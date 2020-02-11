@@ -38,6 +38,7 @@ RUN npm i
 
 # Mount the necessary source code
 ADD .babelrc tsconfig.json webpack.config.js ./
+ADD .git .git
 ADD out/.env.aws out/.env.aws
 ADD web web
 
