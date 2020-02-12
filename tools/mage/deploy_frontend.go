@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	awsEnvFile          = "out/.env.aws"
+	awsEnvFile       = "out/.env.aws"
 	frontendStack    = "panther-app-frontend"
 	frontendTemplate = "deployments/frontend.yml"
 )
