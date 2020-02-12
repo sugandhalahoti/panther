@@ -16,12 +16,12 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 const { spawn } = require('child_process');
-const { configureAwsEnvVars } = require('./utils');
+const { loadDotEnvVars } = require('./utils');
 
 // Mark the Node environment as development in order to load the proper webpack configuration
 process.env.NODE_ENV = 'development';
 
 // Add all the aws-related ENV vars to process.env
-configureAwsEnvVars();
+loadDotEnvVars('out/.env.aws');
 
 spawn('node_modules/.bin/webpack-dev-server', { stdio: 'inherit' });

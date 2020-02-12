@@ -115,7 +115,6 @@
     "build": "node web/scripts/build.js",
     "start": "node web/scripts/start.js",
     "serve": "node web/scripts/serve.js",
-    "deploy-sourcemaps": "node web/scripts/deploy-sourcemaps.js",
     "generate-gql": "graphql-codegen",
     "lint": "eslint \"{web/src/**,.}/*.{ts,js,tsx}\" && prettier --list-different \"{web/src/**,.}/*.{ts,js,tsx,md,json,yml}\" && tsc -p ."
   }

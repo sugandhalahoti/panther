@@ -26,14 +26,6 @@ function loadDotEnvVars(path) {
   }
 }
 
-function configureAwsEnvVars() {
-  loadDotEnvVars('out/.env.aws');
-}
-
-function configureSentryEnvVars() {
-  loadDotEnvVars('web/.env.sentry');
-}
-
 function getPantherDeploymentVersion() {
   try {
     return execSync('git describe --tags')
@@ -44,4 +36,4 @@ function getPantherDeploymentVersion() {
   }
 }
 
-module.exports = { configureAwsEnvVars, configureSentryEnvVars, getPantherDeploymentVersion };
+module.exports = { loadDotEnvVars, getPantherDeploymentVersion };
