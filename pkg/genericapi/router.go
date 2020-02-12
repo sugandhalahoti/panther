@@ -62,6 +62,10 @@ func NewRouter(namespace, component string, validate *validator.Validate, routes
 func (r *Router) Handle(input interface{}) (output interface{}, err error) {
 	req, err := findRequest(input)
 	if err != nil {
+		// we do not have the route yet, special case, use oplog to keep logging standard
+		operation := oplog.NewManager(r.namespace, r.component).Start("findRequest")
+		operation.Stop()
+		operation.Log(err)
 		return nil, err
 	}
 

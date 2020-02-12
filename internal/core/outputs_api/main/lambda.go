@@ -37,7 +37,7 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	router = genericapi.NewRouter(validator, api.API{})
+	router = genericapi.NewRouter("core", "outputsApi", validator, api.API{})
 }
 
 func lambdaHandler(ctx context.Context, input *models.LambdaInput) (interface{}, error) {
