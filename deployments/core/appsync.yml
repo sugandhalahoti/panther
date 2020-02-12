@@ -47,6 +47,7 @@ Resources:
       LogConfig:
         CloudWatchLogsRoleArn: !GetAtt AppsyncServiceRole.Arn
         FieldLogLevel: ALL
+      XrayEnabled: True
 
   GraphQLSchema:
     Type: AWS::AppSync::GraphQLSchema
