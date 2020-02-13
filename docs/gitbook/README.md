@@ -21,8 +21,8 @@ Panther is a powerful, open-source, cloud-native SIEM designed to be:
 Panther's use-cases include:
 
 - **Log Analysis:** Centralize and analyze log data with Rules for threats and suspicious activity
-- **Incident Response:** Perform historical queries with SQL over long-term data for analytics, log correlation, and forensics.
-- **Cloud Compliance:** Detect misconfigured cloud infrastructure and enforce best practices.
+- **Incident Response:** Perform historical queries with SQL over long-term data for analytics, log correlation, and forensics
+- **Cloud Compliance:** Detect misconfigured cloud infrastructure and enforce best practices
 - **Auto Remediation:** Automatically correct non-compliance infrastructure
 
 The following diagram offers a high-level overview of Panther's architecture:
